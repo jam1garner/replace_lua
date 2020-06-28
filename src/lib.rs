@@ -1,164 +1,111 @@
 #![feature(proc_macro_hygiene)]
 
+use std::fs;
 use skyline::{hook, install_hook, hooks::{Region, getRegionAddress}};
-use std::sync::atomic::AtomicU32;
-use skyline::logging::HexDump;
+use skyline::libc::c_char;
+use skyline::c_str;
 
-fn offset_to_addr(offset: usize) -> *const () {
-    unsafe {
-        (getRegionAddress(Region::Text) as *const u8).offset(offset as isize) as _
-    }
-}
+mod resource;
+mod replacement_files;
 
-struct LuaState {
+use resource::*;
+use replacement_files::ARC_FILES;
 
-}
+static mut LOAD_LUA_FROM_INDEX: usize = 0x33a6130;
+static mut LOAD_LUA_FILE: usize = 0x33a6e40;
 
-#[repr(packed)]
-struct Table1Entry {
-    table2_index: u32,
-    is_in_table_2: u32,
-}
+#[skyline::from_offset(LOAD_LUA_FILE)]
+fn load_lua_file(lua_state: *const LuaState, data: *const u8, size: u64, name: *const c_char) -> u64;
 
-#[repr(C)]
-#[derive(Debug)]
-struct Table2Entry {
-    data: *const u8,
-    ref_count: AtomicU32,
-    is_used: bool,
-    unk2: [u8; 0xb]
-}
-
-struct LuaAgent<'a> {
-    unk: u64,
-    lua_state: &'a LuaState
-}
-
-struct CppVector<T> {
-    start: *const T,
-    end: *const T,
-    eos: *const T
-}
-
-#[repr(C)]
-struct LoadedTables {
-    mutex: *const (),
-    table1: *const Table1Entry,
-    table2: *const Table2Entry,
-    table1_len: u32,
-    table2_len: u32,
-    table1_count: u32,
-    unk: u32,
-    table1_list: CppVector<u32>,
-    loaded_directory_table: *const (),
-    loaded_directory_table_size: u32,
-    unk2: u32,
-    unk3: CppVector<u32>,
-    unk4: u8,
-    unk5: [u8; 7],
-    addr: *const (),
-    loaded_data: &'static mut LoadedData,
-    version: u32,
-}
-
-struct LoadedData {
-    arc: &'static mut LoadedArc
-}
-
-struct LoadedArc {
-    magic: u64,
-    music_data_offset: u64,
-    file_data_offset: u64,
-    file_data_offset_2: u64,
-    fs_offset: u64,
-    fs_search_offset: u64,
-    unk_offset: u64,
-    region_entry: *const (),
-    file_path_buckets: *const (),
-    file_path_to_index_hash_group: *const (),
-    file_info_path: *const FileInfoPath
-}
-
-struct FileInfoPath {
-    path: HashIndexGroup,
-    extension: HashIndexGroup,
-    parent: HashIndexGroup,
-    file_name: HashIndexGroup,
-}
-
-#[repr(packed)]
-struct HashIndexGroup {
-    hash40: Hash40,
-    flags: [u8; 3]
-}
-
-#[repr(packed)]
-#[derive(Copy, Clone)]
-struct Hash40 {
-    crc32: u32,
-    len: u8
-}
-
-impl Hash40 {
-    pub fn as_u64(&self) -> u64 {
-        (self.crc32 as u64) + ((self.len as u64) << 32)
-    }
-
-    pub fn from_u64(hash40: u64) -> Self {
-        Self {
-            crc32: hash40 as u32,
-            len: (hash40 >> 32) as u8
-        }
-    }
-}
-
-impl LoadedTables {
-    fn get_arc(&mut self) -> &mut LoadedArc {
-        self.loaded_data.arc
-    }
-
-    fn table_1(&self) -> &[Table1Entry] {
-        unsafe {
-            std::slice::from_raw_parts(self.table1, self.table1_len as usize)
-        }
-    }
-    
-    fn table_2(&self) -> &[Table2Entry] {
-        unsafe {
-            std::slice::from_raw_parts(self.table2, self.table2_len as usize)
-        }
-    }
-
-    fn get_instance() -> &'static mut Self {
-        unsafe {
-            let x: *mut &'static mut Self= std::mem::transmute(offset_to_addr(0x4e05490));
-            *x
-        }
-    }
-}
-
-#[hook(offset = 0x33a6130)]
+#[hook(offset = LOAD_LUA_FROM_INDEX)]
 fn load_lua_from_index(lua_agent: &mut LuaAgent, index_ptr: &mut u32) -> u64 {
-    let index = unsafe { *index_ptr };
-    // println!("index: {}", index);
-    // println!("tables: {:?}", &LoadedTables::get_instance() as *const _);
-    // println!("loaded_data: {:?}", LoadedTables::get_instance().loaded_data as *const _);
-    // println!("{}", HexDump(LoadedTables::get_instance()));
-    //skyline::logging::hex_dump_ptr(&LoadedTables::get_instance() as *const _);
+    let index = *index_ptr;
 
     let tables = LoadedTables::get_instance();
     let arc = tables.get_arc();
     let path_table = arc.file_info_path;
+    let file_info = unsafe { &*path_table.offset(index as isize) };
+    let hash = file_info.path.hash40.as_u64();
 
-    unsafe {
-        let file_info = &*path_table.offset(index as isize);
-        println!("Hash40 = 0x{:x}", file_info.path.hash40.as_u64());
+    if let Some(path) = ARC_FILES.0.get(&hash) {
+        let contents = fs::read(&path).unwrap();
+        let size = contents.len() as u64;
+
+        let ret = unsafe { load_lua_file(lua_agent.lua_state, contents.as_ptr(), size, c_str("buf\0")) };
+
+        if ret == 0 {
+            0 // success
+        } else {
+            // ??? aaaaaaaaa some failure state
+            unsafe {
+                let lua_state = &mut lua_agent.lua_state;
+                let mut top = lua_state.top;
+                let func_next = (*lua_state.call_info).func.offset(1);
+                while top < func_next {
+                  lua_state.top = top.offset(1);
+                  (*top).tt = 0;
+                  top = lua_state.top;
+                }
+                lua_state.top = func_next;
+            }
+
+            0x40000004
+        }
+    } else {
+        original!()(lua_agent, index_ptr)
     }
-    
-    original!()(lua_agent, index_ptr)
 }
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+static LOAD_LUA_FROM_INDEX_START_CODE: &[u8] = &[
+      0xf9, 0x0f, 0x1b, 0xf8,     // str        x25,[sp, #local_50]!
+      0xf8, 0x5f, 0x01, 0xa9,     // stp        x24,x23,[sp, #local_40]
+      0xf6, 0x57, 0x02, 0xa9,     // stp        x22,x21,[sp, #local_30]
+      0xf4, 0x4f, 0x03, 0xa9,     // stp        x20,x19,[sp, #local_20]
+      0xfd, 0x7b, 0x04, 0xa9,     // stp        x29,x30,[sp, #local_10]
+      0xfd, 0x03, 0x01, 0x91,     // add        x29,sp,#0x40
+      0x08, 0x04, 0x40, 0xf9,     // ldr        x8,[lua_agent?, #0x8]
+      0x93, 0x00, 0x80, 0x52,     // mov        w19,#0x4
+      0x13, 0x00, 0xa8, 0x72,     // movk       w19,#0x4000, LSL #16
+];
+
+static LOAD_LUA_FILE_START_CODE: &[u8] = &[
+      0xfc, 0x57, 0xbd, 0xa9,     // stp        x28,x21,[sp, #local_30]!
+      0xf4, 0x4f, 0x01, 0xa9,     // stp        x20,x19,[sp, #local_20]
+      0xfd, 0x7b, 0x02, 0xa9,     // stp        x29,x30,[sp, #local_10]
+      0xfd, 0x83, 0x00, 0x91,     // add        x29,sp,#0x20
+      0xff, 0x43, 0x10, 0xd1,     // sub        sp,sp,#0x410
+      0x73, 0x00, 0x80, 0x52,     // mov        w19,#0x3
+      0x13, 0x00, 0xa8, 0x72,     // movk       w19,#0x4000, LSL #16
+      0x40, 0x01, 0x00, 0xb4,     // cbz        lua_state,LAB_71033a6e84
+];
 
 #[skyline::main(name = "replace_lua")]
 pub fn main() {
+    lazy_static::initialize(&ARC_FILES);
+
+    unsafe {
+        let text_ptr = getRegionAddress(Region::Text) as *const u8;
+        let text_size = (getRegionAddress(Region::Rodata) as usize) - (text_ptr as usize);
+        let text = std::slice::from_raw_parts(text_ptr, text_size);
+        if let Some(offset) = find_subsequence(text, LOAD_LUA_FILE_START_CODE) {
+            LOAD_LUA_FILE = offset
+        } else {
+            println!("Error: no offset found. Defaulting to 7.0.0 offset. This likely won't work.");
+        }
+        
+        let text_ptr = getRegionAddress(Region::Text) as *const u8;
+        let text_size = (getRegionAddress(Region::Rodata) as usize) - (text_ptr as usize);
+        let text = std::slice::from_raw_parts(text_ptr, text_size);
+        if let Some(offset) = find_subsequence(text, LOAD_LUA_FROM_INDEX_START_CODE) {
+            LOAD_LUA_FROM_INDEX = offset
+        } else {
+            println!("Error: no offset found. Defaulting to 7.0.0 offset. This likely won't work.");
+        }
+    }
+
     install_hook!(load_lua_from_index);
 }
