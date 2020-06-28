@@ -1,9 +1,5 @@
 use smash::hash40;
 use std::{fs, io, path::{Path, PathBuf}, collections::HashMap};
-use skyline::hooks::{Region, getRegionAddress};
-use std::sync::atomic::AtomicU32;
-use skyline::libc::c_char;
-use skyline::c_str;
 
 lazy_static::lazy_static!{
     pub static ref ARC_FILES: ArcFiles = ArcFiles::new();
