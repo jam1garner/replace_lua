@@ -63,8 +63,8 @@ pub struct CppVector<T> {
 #[repr(C)]
 pub struct LoadedTables {
     pub mutex: *const (),
-    pub table1: *const Table1Entry,
-    pub table2: *const Table2Entry,
+    pub table1: *mut Table1Entry,
+    pub table2: *mut Table2Entry,
     pub table1_len: u32,
     pub table2_len: u32,
     pub table1_count: u32,
@@ -140,10 +140,16 @@ impl fmt::Debug for HashIndexGroup {
 }
 
 #[repr(packed)]
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone)]
 pub struct Hash40 {
     crc32: u32,
     len: u8
+}
+
+impl fmt::Debug for Hash40 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:x}", self.as_u64())
+    }
 }
 
 impl Hash40 {
@@ -153,14 +159,61 @@ impl Hash40 {
 }
 
 impl LoadedTables {
-    pub fn get_arc(&mut self) -> &mut LoadedArc {
+    pub fn get_arc(&self) -> &LoadedArc {
+        self.loaded_data.arc
+    }
+    
+    pub fn get_arc_mut(&mut self) -> &mut LoadedArc {
         self.loaded_data.arc
     }
 
     pub fn get_instance() -> &'static mut Self {
         unsafe {
-            let instance_ptr: *mut &'static mut Self= std::mem::transmute(offset_to_addr(0x4e05490));
+            let instance_ptr: *mut &'static mut Self= std::mem::transmute(offset_to_addr(0x4ed7200));
             *instance_ptr
         }
     }
+
+    pub fn get_hash_from_t1_index(&self, t1_index: u32) -> Hash40 {
+        let arc = self.get_arc();
+        let path_table = arc.file_info_path;
+        let file_info = unsafe { &*path_table.offset(t1_index as isize) };
+        file_info.path.hash40
+    }
+    
+    pub fn table_1(&self) -> &[Table1Entry] {
+        unsafe {
+            std::slice::from_raw_parts(self.table1, self.table1_len as usize)
+        }
+    }
+    
+    pub fn table_2(&self) -> &[Table2Entry] {
+        unsafe {
+            std::slice::from_raw_parts(self.table2, self.table2_len as usize)
+        }
+    }
+    
+    pub fn table_1_mut(&mut self) -> &mut [Table1Entry] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.table1, self.table1_len as usize)
+        }
+    }
+    
+    pub fn table_2_mut(&mut self) -> &mut [Table2Entry] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.table2, self.table2_len as usize)
+        }
+    }
+
+    pub fn get_t2_mut(&mut self, t1_index: u32) -> Result<&mut Table2Entry, LoadError> {
+        let t1 = self.table_1().get(t1_index as usize).ok_or(LoadError::NoTable1)?;
+        let t2_index = t1.table2_index as usize;
+        self.table_2_mut().get_mut(t2_index).ok_or(LoadError::NoTable2)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum LoadError {
+    NoTable1,
+    NoTable2,
 }
