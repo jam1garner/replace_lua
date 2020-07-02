@@ -1,6 +1,6 @@
 [package]
 name = "replace_lua"
-version = "1.0.0"
+version = "1.1.0"
 authors = ["jam1garner <jam1.mcleod@hotmail.com>"]
 edition = "2018"
 
